@@ -121,21 +121,29 @@ npm test
   (válido para un solo servidor; escalar a varias instancias requeriría
   mover esto a Redis, pero la lógica no cambiaría).
 - **`tableManager.ts`** — `findOrCreateRoom(capacity, buyInCents)`: busca una
-  mesa abierta con esa configuración exacta (hueco libre, sin mano en curso)
-  o crea una nueva. Las salas disponibles son fijas:
+  mesa **pública** abierta con esa configuración exacta (hueco libre, sin
+  mano en curso) o crea una nueva. Las salas disponibles son fijas:
   `ROOM_CAPACITIES = [2, 3, 4]` y `BUY_IN_TIERS_EUROS = [1, 2, 4, 5, 8, 10, 20, 25, 50, 100, 250]`.
+  Para jugar con amigos, `createPrivateRoom(capacity, buyInCents)` crea una
+  mesa marcada como privada con un código de invitación único de 6
+  caracteres (sin `0/O` ni `1/I`, para que sea fácil de compartir de viva
+  voz); `findPrivateRoomByCode(code)` la busca por ese código. Las mesas
+  privadas nunca aparecen en el emparejamiento público de `findOrCreateRoom`.
 - **`socketServer.ts`** — servidor de Socket.io autenticado con el mismo
   access token JWT de `/auth/login`. Eventos:
-  - Cliente → servidor: `table:join` `{capacity, buyInEuros}` (busca/crea
-    sala y debita el buy-in), `table:rebuy` (si te quedaste a 0 fichas),
-    `table:start`, `hand:action` (`{type: "pass"|"bet"|"call"|"raise"|"fold", amount?}`),
+  - Cliente → servidor: `table:join` `{capacity, buyInEuros}` (emparejamiento
+    público), `table:createPrivate` `{capacity, buyInEuros}` (crea una mesa
+    privada y te sienta en ella), `table:joinPrivate` `{code}` (te sienta en
+    la mesa privada de ese código, con el importe que ya tenga fijado),
+    `table:rebuy` (si te quedaste a 0 fichas), `table:start`, `hand:action`
+    (`{type: "pass"|"bet"|"call"|"raise"|"fold", amount?}`),
     `hand:discard` (`{cardIndexes: number[]}`), `table:leave`.
   - Servidor → cliente: `table:state` (estado personalizado: nunca incluye
     las cartas de otros jugadores durante la mano, salvo al terminar por
     showdown o póker de palo instantáneo, donde se revelan las manos de
     todos los que no se retiraron — igual que en una mesa física; incluye
-    también `stacks` con las fichas actuales de cada jugador), `table:error`
-    `{message}`.
+    también `stacks` con las fichas actuales de cada jugador, y `isPrivate`
+    / `code` para poder compartir la invitación), `table:error` `{message}`.
 - **Conexión con el wallet**: el wallet **solo se toca al sentarse o al
   recomprar fichas** (ambos son un `bet_debit` del importe de la mesa). Las
   apuestas de cada mano ya no tocan el wallet directamente: se mueven dentro

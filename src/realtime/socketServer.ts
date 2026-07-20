@@ -5,7 +5,14 @@ import { GameRuleError } from "../modules/game/matchEngine";
 import { DiscardAction, PlayerAction } from "../modules/game/types";
 import { applyWalletTransaction } from "../modules/wallet/repository";
 import { isInsufficientFundsError } from "../modules/wallet/service";
-import { findOrCreateRoom, getTable, isValidBuyInEuros, isValidCapacity } from "../modules/table/tableManager";
+import {
+  createPrivateRoom,
+  findOrCreateRoom,
+  findPrivateRoomByCode,
+  getTable,
+  isValidBuyInEuros,
+  isValidCapacity,
+} from "../modules/table/tableManager";
 import { Table, TableError } from "../modules/table/table";
 
 interface AuthedSocket extends Socket {
@@ -35,6 +42,32 @@ function clearNextHandTimer(tableId: string): void {
   if (timer) {
     clearTimeout(timer);
     nextHandTimers.delete(tableId);
+  }
+}
+
+/**
+ * Debita el importe de la mesa del wallet y sienta al jugador. Si sentarse
+ * falla por cualquier motivo (mesa llena, etc.), devuelve el dinero para no
+ * dejarlo debitado sin mesa. Deja pasar el error de saldo insuficiente y
+ * cualquier otro para que el llamador decida el mensaje.
+ */
+async function debitAndSeat(userId: string, table: Table, buyInCents: number, reason: string): Promise<void> {
+  await applyWalletTransaction({
+    userId,
+    amountCents: BigInt(-buyInCents),
+    type: "bet_debit",
+    metadata: { reason, tableId: table.id },
+  });
+  try {
+    table.seatPlayerWithStack(userId, buyInCents);
+  } catch (err) {
+    await applyWalletTransaction({
+      userId,
+      amountCents: BigInt(buyInCents),
+      type: "bet_credit",
+      metadata: { reason: "buy_in_refund" },
+    });
+    throw err;
   }
 }
 
@@ -138,14 +171,10 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
           return;
         }
         const buyInCents = Math.round(payload.buyInEuros * 100);
+        const table: Table = findOrCreateRoom(payload.capacity, buyInCents);
 
         try {
-          await applyWalletTransaction({
-            userId: socket.userId,
-            amountCents: BigInt(-buyInCents),
-            type: "bet_debit",
-            metadata: { reason: "buy_in", capacity: payload.capacity, buyInEuros: payload.buyInEuros },
-          });
+          await debitAndSeat(socket.userId, table, buyInCents, "buy_in");
         } catch (err) {
           if (isInsufficientFundsError(err)) {
             socket.emit("table:error", {
@@ -156,18 +185,36 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
           throw err;
         }
 
-        const table: Table = findOrCreateRoom(payload.capacity, buyInCents);
+        socket.join(table.id);
+        socket.currentTableId = table.id;
+        broadcastTableState(table.id);
+      } catch (err) {
+        emitError(err, "No se pudo unir a la mesa");
+      }
+    });
+
+    socket.on("table:createPrivate", async (payload: { capacity: number; buyInEuros: number }) => {
+      try {
+        if (!isValidCapacity(payload.capacity)) {
+          socket.emit("table:error", { message: "Ese número de jugadores no es una opción válida" });
+          return;
+        }
+        if (!isValidBuyInEuros(payload.buyInEuros)) {
+          socket.emit("table:error", { message: "Ese importe de mesa no es una opción válido" });
+          return;
+        }
+        const buyInCents = Math.round(payload.buyInEuros * 100);
+        const table = createPrivateRoom(payload.capacity, buyInCents);
+
         try {
-          table.seatPlayerWithStack(socket.userId, buyInCents);
+          await debitAndSeat(socket.userId, table, buyInCents, "buy_in");
         } catch (err) {
-          // Si no se pudo sentar (p. ej. la mesa se llenó justo antes), se
-          // devuelve el buy-in para no dejarle el dinero debitado sin mesa.
-          await applyWalletTransaction({
-            userId: socket.userId,
-            amountCents: BigInt(buyInCents),
-            type: "bet_credit",
-            metadata: { reason: "buy_in_refund" },
-          });
+          if (isInsufficientFundsError(err)) {
+            socket.emit("table:error", {
+              message: `Saldo insuficiente: necesitas al menos ${payload.buyInEuros} € para crear esta sala`,
+            });
+            return;
+          }
           throw err;
         }
 
@@ -175,7 +222,35 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         socket.currentTableId = table.id;
         broadcastTableState(table.id);
       } catch (err) {
-        emitError(err, "No se pudo unir a la mesa");
+        emitError(err, "No se pudo crear la sala privada");
+      }
+    });
+
+    socket.on("table:joinPrivate", async (payload: { code: string }) => {
+      try {
+        const table = findPrivateRoomByCode(payload.code ?? "");
+        if (!table) {
+          socket.emit("table:error", { message: "No existe ninguna sala privada con ese código" });
+          return;
+        }
+
+        try {
+          await debitAndSeat(socket.userId, table, table.buyInCents, "buy_in");
+        } catch (err) {
+          if (isInsufficientFundsError(err)) {
+            socket.emit("table:error", {
+              message: `Saldo insuficiente: esta sala necesita ${(table.buyInCents / 100).toFixed(2)} € para sentarte`,
+            });
+            return;
+          }
+          throw err;
+        }
+
+        socket.join(table.id);
+        socket.currentTableId = table.id;
+        broadcastTableState(table.id);
+      } catch (err) {
+        emitError(err, "No se pudo unir a la sala privada");
       }
     });
 

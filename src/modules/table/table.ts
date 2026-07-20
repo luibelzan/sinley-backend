@@ -7,6 +7,8 @@ export interface TableOptions {
   capacity: number; // 2, 3 o 4
   buyInCents: number; // importe fijo de ficha con el que se sienta cualquiera en esta mesa
   tieBreakVariant?: TieBreakVariant;
+  isPrivate?: boolean;
+  code?: string; // código de invitación, solo para mesas privadas
 }
 
 /**
@@ -29,6 +31,9 @@ export class Table {
   readonly capacity: number;
   readonly buyInCents: number;
   readonly tieBreakVariant: TieBreakVariant;
+  /** Si es privada, no aparece en el emparejamiento público: solo se puede entrar con el código. */
+  readonly isPrivate: boolean;
+  readonly code: string | null;
 
   seatOrder: string[] = [];
   connectedUserIds: Set<string> = new Set();
@@ -52,6 +57,8 @@ export class Table {
     this.capacity = options.capacity;
     this.buyInCents = options.buyInCents;
     this.tieBreakVariant = options.tieBreakVariant ?? "dealer_privilege";
+    this.isPrivate = options.isPrivate ?? false;
+    this.code = options.code ?? null;
   }
 
   /** Jugadores sentados que todavía tienen fichas para jugar la próxima mano. */
@@ -214,6 +221,8 @@ export class Table {
       tableId: this.id,
       capacity: this.capacity,
       buyInCents: this.buyInCents,
+      isPrivate: this.isPrivate,
+      code: this.code,
       seatOrder: this.seatOrder,
       connectedUserIds: [...this.connectedUserIds],
       stacks: Object.fromEntries(this.stacks),
