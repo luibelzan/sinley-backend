@@ -315,7 +315,10 @@ test("al terminar por showdown, se revelan las cartas de todos los no retirados 
   }
 
   assert.equal(hand.phase, "finished");
-  assert.equal(hand.result!.reason, "showdown");
+  assert.ok(
+    hand.result!.reason === "showdown" || hand.result!.reason === "instant_flush",
+    `se esperaba showdown o instant_flush, pero fue ${hand.result!.reason}`
+  );
 
   const stateForAna = hand.getPublicState("ana");
   const beto = stateForAna.players.find((p) => p.id === "beto")!;

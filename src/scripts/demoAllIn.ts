@@ -1,9 +1,10 @@
 /**
- * Script de demostración específico para el escenario de all-in que causaba
- * el bug de "ambos saldos a 0": dos jugadores con el mismo saldo van all-in
- * en la primera ronda, no descartan nada, y la mano termina directamente
- * durante el descarte (apuestas bloqueadas). Comprueba que el saldo final
- * es correcto: el ganador debe quedar con el doble, el perdedor con 0.
+ * Script de demostración del escenario all-in dentro de una sala con buy-in
+ * fijo: dos jugadores se sientan con el MISMO importe (así se ve la mesa
+ * justa que pediste), ambos van all-in en la primera ronda, no descartan
+ * nada, y la mano termina directamente durante el descarte (apuestas
+ * bloqueadas). Comprueba que el stack de fichas de la mesa cuadra: el
+ * ganador se queda con el doble, el perdedor con 0 (y puede recomprar).
  *
  * Requiere que el servidor ya esté corriendo (`npm run dev`).
  * Uso: npm run demo:allin
@@ -11,8 +12,8 @@
 import { io, Socket } from "socket.io-client";
 
 const BASE_URL = process.env.DEMO_BASE_URL ?? "http://localhost:4000";
-const TABLE_ID = `demo-allin-${Date.now()}`;
-const STARTING_BALANCE = 10; // euros, igual para ambos
+const CAPACITY = 2;
+const BUY_IN_EUROS = 10; // ambos se sientan con el mismo importe: mesa justa
 
 interface AuthedUser {
   userId: string;
@@ -32,7 +33,7 @@ async function registerAndFund(username: string): Promise<AuthedUser> {
   const rechargeRes = await fetch(`${BASE_URL}/wallet/recharge`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${registerData.accessToken}` },
-    body: JSON.stringify({ amount: STARTING_BALANCE }),
+    body: JSON.stringify({ amount: BUY_IN_EUROS }),
   });
   if (!rechargeRes.ok) throw new Error(`No se pudo recargar a ${username}: ${await rechargeRes.text()}`);
 
@@ -50,8 +51,8 @@ async function runPlayer(label: string, user: AuthedUser, onFinished: (result: a
   const discardedInPhase = new Set<string>();
 
   socket.on("connect", () => {
-    console.log(`[${label}] conectado, uniéndose a la mesa ${TABLE_ID}`);
-    socket.emit("table:join", { tableId: TABLE_ID });
+    console.log(`[${label}] conectado, uniéndose a una mesa de ${CAPACITY} jugadores a ${BUY_IN_EUROS}€`);
+    socket.emit("table:join", { capacity: CAPACITY, buyInEuros: BUY_IN_EUROS });
   });
 
   socket.on("table:error", (err: { message: string }) => console.log(`[${label}] error:`, err.message));
@@ -67,8 +68,6 @@ async function runPlayer(label: string, user: AuthedUser, onFinished: (result: a
     if (hand.phase !== "discard") discardedInPhase.delete("discard");
 
     if (hand.actingPlayerId === user.userId && ["betting_1", "betting_2", "betting_final"].includes(hand.phase)) {
-      // Siempre pulsa "All-in": bet si nadie ha apostado, raise (con el mismo
-      // centinela que usa el botón real del frontend) si ya hay una apuesta.
       const action =
         hand.currentBetToMatch === 0
           ? { type: "bet", amount: 999_999_999_999 }
@@ -87,12 +86,13 @@ async function runPlayer(label: string, user: AuthedUser, onFinished: (result: a
 }
 
 async function main() {
-  console.log(`Registrando y recargando a dos jugadores con ${STARTING_BALANCE}€ cada uno...`);
+  console.log(`Registrando y recargando a dos jugadores con ${BUY_IN_EUROS}€ cada uno...`);
   const ana = await registerAndFund("ana");
   const beto = await registerAndFund("beto");
 
   let finishedCount = 0;
   let lastResult: any = null;
+  let lastState: any = null;
   const onFinished = (result: any) => {
     finishedCount++;
     lastResult = result;
@@ -100,6 +100,7 @@ async function main() {
 
   const socketAna = await runPlayer("ana", ana, onFinished);
   const socketBeto = await runPlayer("beto", beto, onFinished);
+  socketAna.on("table:state", (s: any) => (lastState = s));
 
   setTimeout(() => {
     console.log("Iniciando la mano...");
@@ -117,28 +118,28 @@ async function main() {
   }
 
   console.log("\nResultado de la mano:", lastResult);
+  await new Promise((r) => setTimeout(r, 500));
 
-  const anaBalance = await getBalance(ana.accessToken);
-  const betoBalance = await getBalance(beto.accessToken);
-  console.log(`Saldo final ana: ${anaBalance} €`);
-  console.log(`Saldo final beto: ${betoBalance} €`);
+  const stacks: Record<string, number> = lastState?.stacks ?? {};
+  const stackValues = Object.values(stacks);
+  const totalCents = stackValues.reduce((a, b) => a + b, 0);
+  const expectedTotalCents = BUY_IN_EUROS * 100 * 2;
 
-  const total = anaBalance + betoBalance;
-  const expectedTotal = STARTING_BALANCE * 2;
+  console.log("Stacks de fichas en la mesa tras la mano:", stacks);
 
   socketAna.disconnect();
   socketBeto.disconnect();
 
-  if (Math.abs(total - expectedTotal) > 0.001) {
-    console.log(`\n❌ FALLO: el dinero total (${total}€) no cuadra con el esperado (${expectedTotal}€)`);
+  if (totalCents !== expectedTotalCents) {
+    console.log(`\n❌ FALLO: el total de fichas (${totalCents}) no cuadra con el esperado (${expectedTotalCents})`);
     process.exit(1);
   }
-  if (anaBalance === 0 && betoBalance === 0) {
-    console.log("\n❌ FALLO: ambos saldos a 0 — el bug ha vuelto");
+  if (stackValues.every((v) => v === 0)) {
+    console.log("\n❌ FALLO: ambos stacks a 0 — el bug ha vuelto");
     process.exit(1);
   }
 
-  console.log("\n✅ OK: el dinero total cuadra y el ganador recibió el bote correctamente");
+  console.log("\n✅ OK: el total de fichas cuadra y el ganador se quedó con el doble");
   process.exit(0);
 }
 

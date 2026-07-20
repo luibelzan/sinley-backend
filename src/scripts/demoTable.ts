@@ -1,15 +1,18 @@
 /**
- * Script de demostración end-to-end del paso 5: registra dos usuarios,
- * los recarga, los conecta por WebSocket, juegan una mesa completa con
- * decisiones automáticas simples, y muestra cómo se mueve el saldo real
- * de cada uno. Requiere que el servidor ya esté corriendo (`npm run dev`).
+ * Script de demostración end-to-end: registra dos usuarios, los recarga, los
+ * sienta en una mesa de 2 jugadores con un buy-in fijo, y juegan una mesa
+ * completa con decisiones automáticas simples. Muestra cómo se debita el
+ * wallet al sentarse (una sola vez) y cómo evoluciona el stack de fichas de
+ * cada uno en la propia mesa (persistente entre manos).
  *
+ * Requiere que el servidor ya esté corriendo (`npm run dev`).
  * Uso: npm run demo:table
  */
 import { io, Socket } from "socket.io-client";
 
 const BASE_URL = process.env.DEMO_BASE_URL ?? "http://localhost:4000";
-const TABLE_ID = `demo-table-${Date.now()}`;
+const CAPACITY = 2;
+const BUY_IN_EUROS = 10;
 
 interface AuthedUser {
   userId: string;
@@ -68,8 +71,8 @@ async function runPlayer(label: string, user: AuthedUser, onFinished: (result: a
   const discardedInPhase = new Set<string>();
 
   socket.on("connect", () => {
-    console.log(`[${label}] conectado, uniéndose a la mesa ${TABLE_ID}`);
-    socket.emit("table:join", { tableId: TABLE_ID });
+    console.log(`[${label}] conectado, uniéndose a una mesa de ${CAPACITY} jugadores a ${BUY_IN_EUROS}€`);
+    socket.emit("table:join", { capacity: CAPACITY, buyInEuros: BUY_IN_EUROS });
   });
 
   socket.on("table:error", (err: { message: string }) => {
@@ -107,11 +110,12 @@ async function main() {
   const ana = await registerAndFund("ana");
   const beto = await registerAndFund("beto");
 
-  console.log(`Saldo inicial ana: ${await getBalance(ana.accessToken)}`);
-  console.log(`Saldo inicial beto: ${await getBalance(beto.accessToken)}`);
+  console.log(`Saldo de wallet inicial ana: ${await getBalance(ana.accessToken)} €`);
+  console.log(`Saldo de wallet inicial beto: ${await getBalance(beto.accessToken)} €`);
 
   let finishedCount = 0;
   let lastResult: any = null;
+  let lastState: any = null;
 
   const onFinished = (result: any) => {
     finishedCount++;
@@ -120,14 +124,18 @@ async function main() {
 
   const socketAna = await runPlayer("ana", ana, onFinished);
   const socketBeto = await runPlayer("beto", beto, onFinished);
+  socketAna.on("table:state", (s: any) => (lastState = s));
 
-  // Cuando ambos se hayan unido, cualquiera de los dos puede iniciar la mano.
+  console.log(`Saldo de wallet tras sentarse (debitado el buy-in de ${BUY_IN_EUROS}€ una sola vez):`);
+  await new Promise((r) => setTimeout(r, 800));
+  console.log(`  ana: ${await getBalance(ana.accessToken)} €`);
+  console.log(`  beto: ${await getBalance(beto.accessToken)} €`);
+
   setTimeout(() => {
     console.log("Iniciando la mano...");
     socketAna.emit("table:start");
   }, 500);
 
-  // Esperamos a que la mano termine (con margen de sobra) y cerramos.
   const deadline = Date.now() + 15_000;
   while (finishedCount === 0 && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 200));
@@ -139,8 +147,13 @@ async function main() {
     console.log("\nLa mano no terminó dentro del tiempo de espera del demo.");
   }
 
-  console.log(`Saldo final ana: ${await getBalance(ana.accessToken)}`);
-  console.log(`Saldo final beto: ${await getBalance(beto.accessToken)}`);
+  await new Promise((r) => setTimeout(r, 500));
+  console.log("\nStacks de fichas en la mesa tras la mano (esto es lo que persiste, no el wallet):");
+  console.log(JSON.stringify(lastState?.stacks, null, 2));
+
+  console.log(`\nEl saldo de wallet de ambos NO cambia hand a hand (solo se tocó al sentarse):`);
+  console.log(`  ana: ${await getBalance(ana.accessToken)} €`);
+  console.log(`  beto: ${await getBalance(beto.accessToken)} €`);
 
   socketAna.disconnect();
   socketBeto.disconnect();

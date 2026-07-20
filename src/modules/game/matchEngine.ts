@@ -561,6 +561,28 @@ export class GileHand {
     this.phase = GamePhase.FINISHED;
   }
 
+  /**
+   * Fichas resultantes de cada jugador tras esta mano (solo válido una vez
+   * terminada): lo que le quedaba de stack sin llegar a apostar, más lo que
+   * haya ganado en el reparto del bote. La capa de mesa lo usa para
+   * mantener el stack persistente de cada jugador entre manos (estilo
+   * casino real, no se reinicia cada mano).
+   */
+  getFinalStacks(): Record<string, number> {
+    if (!this.result) {
+      throw new GameRuleError("La mano todavía no ha terminado");
+    }
+    const payoutByPlayer = new Map(this.result.payouts.map((p) => [p.playerId, p.amount]));
+    const final: Record<string, number> = {};
+    for (const id of this.seating) {
+      const stack = this.stacks.get(id) ?? 0;
+      const player = this.players.get(id)!;
+      const remaining = stack - player.totalContributed;
+      final[id] = remaining + (payoutByPlayer.get(id) ?? 0);
+    }
+    return final;
+  }
+
   // ---------- vista pública (sin filtrar cartas ocultas) ----------
 
   getPublicState(forPlayerId: string) {

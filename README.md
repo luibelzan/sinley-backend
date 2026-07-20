@@ -106,53 +106,56 @@ npm test
 
 ## Tiempo real (`src/realtime/`, `src/modules/table/`)
 
-- **`Table`** (`modules/table/table.ts`) — jugadores sentados, rotación del
-  repartidor, ciclo de vida de la `GileHand` actual. Vive en memoria del
-  proceso (válido para un solo servidor; escalar a varias instancias
-  requeriría mover esto a Redis, pero la lógica no cambiaría).
+- **`Table`** (`modules/table/table.ts`) — una mesa con **capacidad fija** (2,
+  3 o 4 jugadores) e **importe de ficha fijo** (`buyInCents`): todos los que
+  se sientan lo hacen con el mismo dinero, para que la partida sea justa
+  (antes cada jugador podía entrar con el saldo que le diera la gana). El
+  stack de fichas de cada jugador **persiste entre manos** (estilo casino
+  real: si ganas subes, si pierdes bajas) y solo se sincroniza con el wallet
+  en dos momentos: al sentarse (se debita el buy-in) y al recomprar fichas
+  si te quedas a 0 (`table:rebuy`, mismo importe). Si sales de la mesa, las
+  fichas que te quedaran no se devuelven todavía (pendiente de decidir qué
+  hacer con el saldo de un jugador ausente). Vive en memoria del proceso
+  (válido para un solo servidor; escalar a varias instancias requeriría
+  mover esto a Redis, pero la lógica no cambiaría).
+- **`tableManager.ts`** — `findOrCreateRoom(capacity, buyInCents)`: busca una
+  mesa abierta con esa configuración exacta (hueco libre, sin mano en curso)
+  o crea una nueva. Las salas disponibles son fijas:
+  `ROOM_CAPACITIES = [2, 3, 4]` y `BUY_IN_TIERS_EUROS = [1, 2, 4, 5, 8, 10, 20, 25, 50, 100, 250]`.
 - **`socketServer.ts`** — servidor de Socket.io autenticado con el mismo
   access token JWT de `/auth/login`. Eventos:
-  - Cliente → servidor: `table:join` `{tableId}`, `table:start`, `hand:action`
-    (`{type: "pass"|"bet"|"call"|"raise"|"fold", amount?}`), `hand:discard`
-    (`{cardIndexes: number[]}`), `table:leave`.
+  - Cliente → servidor: `table:join` `{capacity, buyInEuros}` (busca/crea
+    sala y debita el buy-in), `table:rebuy` (si te quedaste a 0 fichas),
+    `table:start`, `hand:action` (`{type: "pass"|"bet"|"call"|"raise"|"fold", amount?}`),
+    `hand:discard` (`{cardIndexes: number[]}`), `table:leave`.
   - Servidor → cliente: `table:state` (estado personalizado: nunca incluye
     las cartas de otros jugadores durante la mano, salvo al terminar por
     showdown o póker de palo instantáneo, donde se revelan las manos de
-    todos los que no se retiraron — igual que en una mesa física), `table:error`
+    todos los que no se retiraron — igual que en una mesa física; incluye
+    también `stacks` con las fichas actuales de cada jugador), `table:error`
     `{message}`.
-- **Conexión con el wallet**: antes de aplicar cualquier `bet`/`call`/`raise`
-  al motor, se debita el wallet del jugador (`bet_debit`); si no hay saldo
-  suficiente, la acción se rechaza y el motor ni se entera. Al terminar la
-  mano, el bote se acredita al ganador (`bet_credit`). Todo queda registrado
-  en `wallet_transactions` como cualquier otro movimiento.
+- **Conexión con el wallet**: el wallet **solo se toca al sentarse o al
+  recomprar fichas** (ambos son un `bet_debit` del importe de la mesa). Las
+  apuestas de cada mano ya no tocan el wallet directamente: se mueven dentro
+  del stack de fichas de la mesa (que el motor limita automáticamente al
+  saldo real de cada jugador — ver all-in), y ese stack se sincroniza al
+  terminar cada mano. Si no hay saldo suficiente para sentarse o recomprar,
+  la acción se rechaza con un mensaje claro.
 
-### Probarlo con el script de demo
-Como probar WebSockets a mano con curl no es práctico, hay un script que
-simula una mesa de 2 jugadores completa, con decisiones automáticas simples
-(apuesta fija, igualar, no descartar nada), mostrando el saldo real antes y
-después:
+### Probarlo con los scripts de demo
+Como probar WebSockets a mano con curl no es práctico, hay dos scripts:
 
 ```bash
 # con el servidor ya corriendo en otra terminal (npm run dev)
-npm run demo:table
+npm run demo:table   # mesa de 2 jugadores con apuestas normales
+npm run demo:allin   # ambos van all-in con el mismo importe, comprueba que el reparto de fichas cuadra
 ```
 
-Deberías ver algo como:
-```
-Registrando y recargando a dos jugadores de prueba...
-Saldo inicial ana: 50
-Saldo inicial beto: 50
-[ana] conectado, uniéndose a la mesa demo-table-...
-[beto] conectado, uniéndose a la mesa demo-table-...
-Iniciando la mano...
-[beto] fase=betting_1 pot=0 -> {"type":"bet","amount":100}
-[ana] fase=betting_1 pot=100 -> {"type":"call"}
-...
-Resultado de la mano: { winnerId: '...', pot: ..., reason: 'showdown', ... }
-Saldo final ana: ...
-Saldo final beto: ...
-```
+`demo:table` muestra el saldo de wallet antes y después de sentarse (se
+debita el buy-in una sola vez) y cómo evoluciona el stack de fichas de la
+mesa mano a mano, sin que el wallet vuelva a moverse hasta que alguien
+recompre o se siente en otra mesa.
 
 ## Siguiente paso
-Paso 6: frontend — cliente React que se conecta a la autenticación, el wallet
-y la mesa en tiempo real.
+Pendiente de decidir: qué hacer con las fichas de un jugador que abandona la
+mesa (¿se devuelven al wallet al salir? ¿solo si no hay mano en curso?).
