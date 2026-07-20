@@ -347,3 +347,45 @@ test("al terminar por retirada de todos menos uno, las cartas siguen ocultas", (
   const beto = stateForAna.players.find((p) => p.id === "beto")!;
   assert.equal(beto.hand, undefined, "beto ganó por retirada, no tuvo que enseñar sus cartas");
 });
+
+test("descarte con 4 jugadores descartando el máximo: se rebarajan los descartes en vez de fallar", () => {
+  // Con la baraja de 28 cartas, el peor caso (4 jugadores x 4 cartas cada
+  // uno = 16 cartas nuevas) no cabe con lo que queda del mazo tras los dos
+  // repartos (28 - 8 - 8 = 12): tiene que rebarajar los descartes a mitad
+  // de la fase para poder completarla.
+  const hand = new GileHand({
+    playerIds: ["ana", "beto", "carla", "dario"],
+    dealerId: "ana",
+    tieBreakVariant: "dealer_privilege",
+    stacks: { ana: 100_000, beto: 100_000, carla: 100_000, dario: 100_000 },
+  });
+  hand.start();
+
+  // Ronda 1: todos pasan (nadie apuesta, así que nadie se retira).
+  hand.applyAction("beto", { type: "pass" });
+  hand.applyAction("carla", { type: "pass" });
+  hand.applyAction("dario", { type: "pass" });
+  hand.applyAction("ana", { type: "pass" });
+
+  if (hand.phase === GamePhase.FINISHED) return; // póker de palo instantáneo por azar: nada que probar aquí
+
+  // Ronda 2: todos pasan otra vez.
+  hand.applyAction("beto", { type: "pass" });
+  hand.applyAction("carla", { type: "pass" });
+  hand.applyAction("dario", { type: "pass" });
+  hand.applyAction("ana", { type: "pass" });
+
+  if (hand.phase !== GamePhase.DISCARD) return; // instant_flush por azar
+
+  // Los 4 descartan las 4 cartas: no debe lanzar ningún error.
+  assert.doesNotThrow(() => hand.applyDiscard("beto", { cardIndexes: [0, 1, 2, 3] }));
+  assert.doesNotThrow(() => hand.applyDiscard("carla", { cardIndexes: [0, 1, 2, 3] }));
+  assert.doesNotThrow(() => hand.applyDiscard("dario", { cardIndexes: [0, 1, 2, 3] }));
+  assert.doesNotThrow(() => hand.applyDiscard("ana", { cardIndexes: [0, 1, 2, 3] }));
+
+  assert.equal(hand.phase, GamePhase.BETTING_FINAL);
+  for (const id of ["ana", "beto", "carla", "dario"]) {
+    const p = hand.getPublicState(id).players.find((pl) => pl.id === id)!;
+    assert.equal(p.cardCount, 4, `${id} debería seguir teniendo 4 cartas tras el descarte`);
+  }
+});

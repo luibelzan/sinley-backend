@@ -87,6 +87,8 @@ export class GileHand {
   private readonly stacks: Map<string, number>;
 
   private deck: Card[] = [];
+  /** Cartas descartadas durante la fase de descarte actual, listas para rebarajar si el mazo se queda corto. */
+  private discardPile: Card[] = [];
   private players: Map<string, PlayerState> = new Map();
   private order: string[];
 
@@ -397,6 +399,7 @@ export class GileHand {
         return;
       }
       this.phase = GamePhase.DISCARD;
+      this.discardPile = [];
       for (const p of this.players.values()) p.hasDiscardedThisPhase = false;
       this.actingPlayerId = this.order[this.firstToActIndex()]!;
       return;
@@ -427,6 +430,20 @@ export class GileHand {
     return { winnerId, evaluations };
   }
 
+  /**
+   * Reparte `count` cartas para el descarte. Si el mazo no da para tanto,
+   * se barajan de nuevo las cartas ya descartadas en esta fase (por
+   * cualquier jugador) y se continúa repartiendo desde ahí — en vez de
+   * rechazar el descarte por falta de cartas.
+   */
+  private drawForDiscard(count: number): Card[] {
+    if (this.deck.length < count) {
+      this.deck = shuffleDeck([...this.deck, ...this.discardPile]);
+      this.discardPile = [];
+    }
+    return drawCards(this.deck, count);
+  }
+
   // ---------- descarte ----------
 
   applyDiscard(playerId: string, discard: DiscardAction): void {
@@ -449,16 +466,21 @@ export class GileHand {
         throw new GameRuleError(`Índice de descarte fuera de rango: ${idx}`);
       }
     }
-    if (uniqueIndexes.size > this.deck.length) {
+    if (uniqueIndexes.size > this.deck.length + this.discardPile.length) {
+      // Ni siquiera rebarajando todo lo ya descartado en esta fase hay
+      // suficientes cartas: esto sería un error de diseño del mazo, no una
+      // situación de juego normal.
       throw new GameRuleError(
-        `No quedan cartas suficientes en el mazo para completar el descarte (pedidas ${uniqueIndexes.size}, quedan ${this.deck.length})`
+        `No quedan cartas suficientes para completar el descarte ni rebarajando los descartes (pedidas ${uniqueIndexes.size}, disponibles ${this.deck.length + this.discardPile.length})`
       );
     }
 
+    const discarded = player.hand.filter((_, idx) => uniqueIndexes.has(idx));
     const keep = player.hand.filter((_, idx) => !uniqueIndexes.has(idx));
-    const newCards = drawCards(this.deck, uniqueIndexes.size);
+    const newCards = this.drawForDiscard(uniqueIndexes.size);
     player.hand = [...keep, ...newCards];
     player.hasDiscardedThisPhase = true;
+    this.discardPile.push(...discarded);
 
     const activeIds = this.activePlayers().map((p) => p.id);
     const allDiscarded = activeIds.every((id) => this.players.get(id)!.hasDiscardedThisPhase);

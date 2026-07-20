@@ -24,6 +24,20 @@ const socketsByUserId = new Map<string, AuthedSocket>();
 /** userId -> username, para poder mostrar nombres en vez de UUIDs en el cliente. */
 const usernamesByUserId = new Map<string, string>();
 
+/** Segundos de pausa tras terminar una mano, para poder ver el resultado y las cartas del rival. */
+const HAND_END_PAUSE_MS = 6000;
+
+/** tableId -> temporizador pendiente para arrancar la siguiente mano automáticamente. */
+const nextHandTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearNextHandTimer(tableId: string): void {
+  const timer = nextHandTimers.get(tableId);
+  if (timer) {
+    clearTimeout(timer);
+    nextHandTimers.delete(tableId);
+  }
+}
+
 export function initSocketServer(httpServer: HttpServer): SocketIOServer {
   const io = new SocketIOServer(httpServer, {
     cors: { origin: "*" }, // TODO: restringir a los orígenes reales del cliente en producción
@@ -68,8 +82,12 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
 
     /**
      * Punto único para "cerrar el ciclo" tras cualquier cosa que pueda hacer
-     * terminar una mano: difunde el estado (con el resultado, si lo hay) y
-     * solo después sincroniza las fichas y limpia la mano de la mesa. El
+     * terminar una mano: difunde el estado (con el resultado y las cartas
+     * reveladas, si las hay) y lo deja tal cual, SIN tocar nada más, durante
+     * toda la pausa (HAND_END_PAUSE_MS) — así todo el mundo tiene tiempo de
+     * verlo. Solo al final de esa pausa se sincronizan las fichas, se limpia
+     * la mano, y si siguen quedando al menos 2 jugadores con fichas se
+     * arranca la siguiente sola, sin que nadie tenga que pulsar nada. El
      * dinero de las apuestas nunca toca el wallet aquí — solo se mueve
      * dentro del stack de fichas de la mesa (persistente entre manos); el
      * wallet solo se toca al sentarse (buy-in) o al volver a comprar fichas.
@@ -79,9 +97,24 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       if (!table) return;
       const hand = table.currentHand;
       broadcastTableState(tableId);
+
       if (hand?.result) {
-        table.finishHandCleanup();
-        broadcastTableState(tableId); // para que se vean ya los stacks actualizados
+        clearNextHandTimer(tableId);
+        const timer = setTimeout(() => {
+          nextHandTimers.delete(tableId);
+          const t = getTable(tableId);
+          if (!t || t.currentHand !== hand) return; // algo raro cambió mientras tanto: no tocar nada
+          t.finishHandCleanup();
+          if (!t.isGameOver() && t.canStartHand()) {
+            try {
+              t.startHand();
+            } catch {
+              // no pasa nada: se quedará esperando a que alguien pulse "Empezar mano"
+            }
+          }
+          broadcastTableState(tableId);
+        }, HAND_END_PAUSE_MS);
+        nextHandTimers.set(tableId, timer);
       }
     }
 
@@ -242,6 +275,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       const table = getTable(tableId);
       if (table) {
         table.removePlayer(socket.userId);
+        if (table.seatOrder.length < 2) clearNextHandTimer(tableId);
       }
       socket.leave(tableId);
       socket.currentTableId = null;

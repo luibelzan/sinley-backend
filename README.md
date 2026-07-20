@@ -55,8 +55,8 @@ Implementa el reglamento oficial de **Sin Ley**. Lógica pura, sin dependencias
 de base de datos ni de red — se testea sola y se conectará a WebSockets en el
 próximo paso:
 
-- `types.ts` — palos, cartas (baraja de 32: As, Tres, Cinco comodín, Siete,
-  Diez, Sota, Caballero, Rey), fases y tipos de acción. 2 a 4 jugadores.
+- `types.ts` — palos, cartas (baraja de 28: As, Tres, Cinco comodín, Siete,
+  Sota, Caballero, Rey), fases y tipos de acción. 2 a 4 jugadores.
 - `deck.ts` — mazo y barajado con RNG criptográfico.
 - `handEvaluator.ts` — puntuación de una mano de 4 cartas: Sin Ley Real (4
   ases) > Sin Ley (3 ases) > puntuación por palo (solo cuentan las cartas del
@@ -93,11 +93,13 @@ alguien tiene delante en una mesa física. A partir de ahí:
   al stack), y es exactamente esa cantidad la que la capa de sockets debita
   del wallet — nunca la cantidad nominal que el jugador pidió.
 
-**Nota**: con la baraja de 32 cartas, el peor caso posible (4 jugadores
-descartando las 4 cartas cada uno = 16 cartas) encaja justo con las 16 que
-quedan en el mazo en ese punto, así que ya no hay riesgo de quedarse sin
-cartas en el descarte. El motor conserva de todas formas una comprobación
-explícita que lanzaría un `GameRuleError` claro si esto cambiara en el futuro.
+**Nota sobre el descarte**: con la baraja de 28 cartas, el peor caso posible
+(4 jugadores descartando las 4 cartas cada uno = 16 cartas) no cabe con lo
+que queda del mazo tras los dos repartos (28 − 8 − 8 = 12). En vez de
+rechazar el descarte, el motor **reparte primero del mazo y, en cuanto se
+queda corto, baraja de nuevo las cartas ya descartadas en esta fase** (por
+cualquier jugador) y sigue repartiendo desde ahí — igual que se haría en una
+mesa física si se acabaran las cartas del mazo a mitad de repartir.
 
 Correr los tests:
 ```bash
@@ -141,6 +143,18 @@ npm test
   saldo real de cada jugador — ver all-in), y ese stack se sincroniza al
   terminar cada mano. Si no hay saldo suficiente para sentarse o recomprar,
   la acción se rechaza con un mensaje claro.
+- **Pausa y continuación automática**: al terminar una mano, se difunde el
+  resultado (con las cartas del rival reveladas si hubo showdown) y se deja
+  una pausa de `HAND_END_PAUSE_MS` (6 segundos) antes de arrancar la
+  siguiente mano sola — nadie tiene que pulsar ningún botón entre manos,
+  salvo la primera de la sesión. Esto se repite automáticamente mientras
+  sigan quedando al menos 2 jugadores con fichas.
+- **Fin de partida**: en cuanto, entre manos, deja de haber más de un
+  jugador con fichas (y ya se había jugado alguna mano), `Table.isGameOver()`
+  se activa y el estado incluye `standings`: la clasificación final
+  (posición y ganancia/pérdida neta de cada jugador, sumando todas sus
+  compras de fichas incluidas las recompras). El frontend muestra entonces
+  una pantalla de resultados en vez de la mesa.
 
 ### Probarlo con los scripts de demo
 Como probar WebSockets a mano con curl no es práctico, hay dos scripts:

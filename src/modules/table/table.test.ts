@@ -93,3 +93,44 @@ test("al salir de la mesa sin mano en curso, se pierden las fichas que quedaran 
   assert.equal(table.stacks.has("ana"), false);
   assert.equal(table.seatOrder.includes("ana"), false);
 });
+
+test("la partida no se da por terminada antes de haber jugado ninguna mano", () => {
+  const table = new Table("t6", { capacity: 2, buyInCents: 500 });
+  table.seatPlayerWithStack("ana", 500);
+  // Todavía no se ha unido nadie más: solo 1 jugador con fichas, pero como
+  // el juego nunca ha empezado, esto NO es "fin de partida".
+  assert.equal(table.isGameOver(), false);
+});
+
+test("la partida se da por terminada cuando, tras jugar, ya no queda más de un jugador con fichas", () => {
+  const table = new Table("t7", { capacity: 2, buyInCents: 500 });
+  table.seatPlayerWithStack("ana", 500);
+  table.seatPlayerWithStack("beto", 500);
+
+  const hand = table.startHand();
+  hand.applyAction("beto", { type: "bet", amount: 999_999 }); // all-in
+  hand.applyAction("ana", { type: "raise", amount: 999_999 }); // all-in también
+
+  if (hand.phase === GamePhase.DISCARD) {
+    hand.applyDiscard("beto", { cardIndexes: [] });
+    hand.applyDiscard("ana", { cardIndexes: [] });
+  }
+  assert.equal(hand.phase, GamePhase.FINISHED);
+  table.finishHandCleanup();
+
+  // Con capacidad 2 y uno de los dos a 0 fichas, ya no puede continuar.
+  assert.equal(table.isGameOver(), true);
+
+  const standings = table.getFinalStandings();
+  assert.equal(standings.length, 2);
+  assert.equal(standings[0]!.position, 1);
+  assert.equal(standings[1]!.position, 2);
+  // El de la posición 1 tiene más fichas que el de la 2.
+  assert.ok(standings[0]!.finalStackCents > standings[1]!.finalStackCents);
+  // Las ganancias netas de todos suman 0 (nadie mete ni saca dinero de fuera del bote).
+  const totalNet = standings.reduce((sum, s) => sum + s.netCents, 0);
+  assert.equal(totalNet, 0);
+  // El ganador tiene +500 de neto (dobló su buy-in), el perdedor -500.
+  assert.equal(standings[0]!.netCents, 500);
+  assert.equal(standings[1]!.netCents, -500);
+});

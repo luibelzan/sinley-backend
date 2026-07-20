@@ -1,7 +1,5 @@
-// Baraja española de 32 cartas: As, Tres (x2), Cinco (comodín), Siete, Sota,
-// Caballero, Rey — 7 rangos x 4 palos, más una segunda Tres por palo para
-// llegar a 32 (ver deck.ts). El Tres duplicado sustituye a un "10" inventado
-// que no existe en ninguna baraja española real.
+// Baraja española de 28 cartas: As, Tres, Cinco (comodín), Siete, Sota,
+// Caballero, Rey — 7 rangos x 4 palos.
 export const SUITS = ["oros", "copas", "espadas", "bastos"] as const;
 export type Suit = (typeof SUITS)[number];
 

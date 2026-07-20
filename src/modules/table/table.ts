@@ -34,8 +34,12 @@ export class Table {
   connectedUserIds: Set<string> = new Set();
   /** Fichas actuales de cada jugador sentado. Persiste entre manos. */
   stacks: Map<string, number> = new Map();
+  /** Total comprado por cada jugador en toda la sesión (buy-in inicial + recompras), para calcular ganancias netas. */
+  totalBuyIns: Map<string, number> = new Map();
   dealerIndex = 0;
   currentHand: GileHand | null = null;
+  /** Se pone a true en cuanto se juega la primera mano; distingue "esperando jugadores" de "partida terminada". */
+  private hasGameStarted = false;
 
   constructor(id: string, options: TableOptions) {
     if (options.capacity < MIN_PLAYERS || options.capacity > MAX_PLAYERS) {
@@ -73,6 +77,7 @@ export class Table {
     this.seatOrder.push(userId);
     this.connectedUserIds.add(userId);
     this.stacks.set(userId, stackCents);
+    this.totalBuyIns.set(userId, (this.totalBuyIns.get(userId) ?? 0) + stackCents);
   }
 
   /** ¿Puede este jugador volver a comprar fichas ahora mismo? (se quedó a 0, no hay mano en curso). */
@@ -86,6 +91,7 @@ export class Table {
       throw new TableError("No puedes volver a comprar fichas ahora mismo");
     }
     this.stacks.set(userId, this.buyInCents);
+    this.totalBuyIns.set(userId, (this.totalBuyIns.get(userId) ?? 0) + this.buyInCents);
   }
 
   /** El jugador pierde la conexión, pero puede volver a entrar sin perder su asiento ni sus fichas. */
@@ -155,7 +161,33 @@ export class Table {
     });
     hand.start();
     this.currentHand = hand;
+    this.hasGameStarted = true;
     return hand;
+  }
+
+  /**
+   * La partida se considera terminada cuando ya se ha jugado al menos una
+   * mano y, entre manos, ya no queda más de un jugador con fichas para
+   * seguir — no antes (mientras se espera a que se sienten los primeros
+   * jugadores, todavía no ha "terminado" nada).
+   */
+  isGameOver(): boolean {
+    return this.hasGameStarted && !this.currentHand && this.fundedSeatOrder().length < 2;
+  }
+
+  /** Clasificación final (estilo resultado de torneo): posición y ganancia/pérdida neta de cada jugador. */
+  getFinalStandings(): { userId: string; finalStackCents: number; totalBuyInCents: number; netCents: number; position: number }[] {
+    const entries = this.seatOrder.map((id) => ({
+      userId: id,
+      finalStackCents: this.stacks.get(id) ?? 0,
+      totalBuyInCents: this.totalBuyIns.get(id) ?? 0,
+    }));
+    entries.sort((a, b) => b.finalStackCents - a.finalStackCents);
+    return entries.map((entry, index) => ({
+      ...entry,
+      netCents: entry.finalStackCents - entry.totalBuyInCents,
+      position: index + 1,
+    }));
   }
 
   /** Se llama tras liquidar (o no) el resultado de la mano: sincroniza fichas y prepara la siguiente. */
@@ -177,6 +209,7 @@ export class Table {
   }
 
   getPublicStateFor(userId: string) {
+    const gameOver = this.isGameOver();
     return {
       tableId: this.id,
       capacity: this.capacity,
@@ -186,6 +219,8 @@ export class Table {
       stacks: Object.fromEntries(this.stacks),
       dealerId: this.seatOrder.length > 0 ? this.seatOrder[this.dealerIndex % this.seatOrder.length] : null,
       hand: this.currentHand ? this.currentHand.getPublicState(userId) : null,
+      gameOver,
+      standings: gameOver ? this.getFinalStandings() : null,
     };
   }
 }

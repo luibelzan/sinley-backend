@@ -8,23 +8,11 @@ function card(suit: Card["suit"], rank: Card["rank"]): Card {
   return { suit, rank };
 }
 
-test("la baraja tiene 32 cartas: 7 rangos x 4 palos + una Tres duplicada por palo", () => {
+test("la baraja tiene 28 cartas: 7 rangos x 4 palos, todas distintas", () => {
   const deck = createDeck();
-  assert.equal(deck.length, 32);
-
-  const threesPerSuit = new Map<string, number>();
-  for (const card of deck) {
-    if (card.rank === 3) {
-      threesPerSuit.set(card.suit, (threesPerSuit.get(card.suit) ?? 0) + 1);
-    }
-  }
-  for (const suit of ["oros", "copas", "espadas", "bastos"] as const) {
-    assert.equal(threesPerSuit.get(suit), 2, `${suit} debería tener dos Tres`);
-  }
-
-  // El resto de rangos (no Tres) no deberían repetirse dentro de un mismo palo.
-  const nonThreeKeys = deck.filter((c) => c.rank !== 3).map((c) => `${c.suit}-${c.rank}`);
-  assert.equal(new Set(nonThreeKeys).size, nonThreeKeys.length);
+  assert.equal(deck.length, 28);
+  const unique = new Set(deck.map((c) => `${c.suit}-${c.rank}`));
+  assert.equal(unique.size, 28);
 });
 
 test("Sin Ley Real: cuatro ases (de cualquier palo) es la mejor mano posible", () => {

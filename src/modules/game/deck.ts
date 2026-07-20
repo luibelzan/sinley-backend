@@ -7,9 +7,6 @@ export function createDeck(): Card[] {
     for (const rank of RANKS) {
       deck.push({ suit, rank });
     }
-    // Segunda Tres por palo: sustituye al "10" inventado que había antes,
-    // usando una carta que sí existe en la baraja real (con su mismo arte).
-    deck.push({ suit, rank: 3 });
   }
   return deck;
 }
