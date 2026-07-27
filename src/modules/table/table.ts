@@ -5,6 +5,13 @@ export class TableError extends Error {}
 
 export interface StandingEntry {
   userId: string;
+  /**
+   * Se rellena en la capa de sockets al congelar la clasificación (ver
+   * settleGameOverPayouts): la Table en sí no conoce usernames, solo
+   * userIds. Se congela junto con el resto de datos precisamente para que
+   * no dependa de que ese jugador siga sentado en la mesa más tarde.
+   */
+  username?: string;
   finalStackCents: number;
   totalBuyInCents: number;
   netCents: number;

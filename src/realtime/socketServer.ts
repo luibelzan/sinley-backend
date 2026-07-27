@@ -179,6 +179,13 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
 
           if (t.isGameOver() && !t.cachedStandings) {
             const standings = t.settleGameOverPayouts();
+            // Se congela el nombre de usuario JUNTO con el resto de datos:
+            // si alguien sale de la mesa después de ver el resultado, su
+            // nombre no debe desaparecer de la clasificación de los demás.
+            t.cachedStandings = standings.map((entry) => ({
+              ...entry,
+              username: usernamesByUserId.get(entry.userId) ?? entry.userId,
+            }));
             for (const entry of standings) {
               if (entry.finalStackCents <= 0) continue;
               try {

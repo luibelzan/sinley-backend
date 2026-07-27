@@ -243,3 +243,31 @@ test("una recompra tras el fin de partida olvida la clasificación congelada (la
   table.rebuy(loserId);
   assert.equal(table.cachedStandings, null);
 });
+
+test("el nombre congelado en cachedStandings no desaparece aunque el jugador salga de la mesa después", () => {
+  const table = new Table("t12", { capacity: 2, buyInCents: 1000 });
+  table.seatPlayerWithStack("ana", 1000);
+  table.seatPlayerWithStack("beto", 1000);
+
+  const hand = table.startHand();
+  hand.applyAction("beto", { type: "bet", amount: 999_999 });
+  hand.applyAction("ana", { type: "raise", amount: 999_999 });
+  if (hand.phase === GamePhase.DISCARD) {
+    hand.applyDiscard("beto", { cardIndexes: [] });
+    hand.applyDiscard("ana", { cardIndexes: [] });
+  }
+  table.finishHandCleanup();
+
+  const standings = table.settleGameOverPayouts();
+  // Esto es lo que hace socketServer.ts: congelar el username junto con el resto.
+  table.cachedStandings = standings.map((entry) => ({ ...entry, username: `nombre-${entry.userId}` }));
+
+  // Uno de los dos sale de la mesa explícitamente (como al pulsar "Volver al panel").
+  const winnerId = table.stacks.get("ana") === 0 ? "beto" : "ana";
+  table.removePlayer(winnerId);
+  assert.equal(table.seatOrder.includes(winnerId), false);
+
+  // La clasificación congelada sigue teniendo su nombre, aunque ya no esté sentado.
+  const entryForWinner = table.cachedStandings!.find((s) => s.userId === winnerId)!;
+  assert.equal(entryForWinner.username, `nombre-${winnerId}`);
+});
