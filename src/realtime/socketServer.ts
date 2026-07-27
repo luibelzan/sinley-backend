@@ -34,15 +34,22 @@ const usernamesByUserId = new Map<string, string>();
 /** Segundos de pausa tras terminar una mano, para poder ver el resultado y las cartas del rival. */
 const HAND_END_PAUSE_MS = 6000;
 
-/** tableId -> temporizador pendiente para arrancar la siguiente mano automáticamente. */
-const nextHandTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Segundos de cuenta atrás antes de la primera mano de la partida, en cuanto hay jugadores suficientes. */
+const FIRST_HAND_COUNTDOWN_MS = 5000;
 
-function clearNextHandTimer(tableId: string): void {
-  const timer = nextHandTimers.get(tableId);
-  if (timer) {
-    clearTimeout(timer);
-    nextHandTimers.delete(tableId);
+/** tableId -> temporizador pendiente para arrancar una mano (la primera, o la siguiente tras la pausa). */
+const scheduledStarts = new Map<string, { timer: ReturnType<typeof setTimeout>; startAt: number }>();
+
+function clearScheduledStart(tableId: string): void {
+  const entry = scheduledStarts.get(tableId);
+  if (entry) {
+    clearTimeout(entry.timer);
+    scheduledStarts.delete(tableId);
   }
+}
+
+function getScheduledStartAt(tableId: string): number | null {
+  return scheduledStarts.get(tableId)?.startAt ?? null;
 }
 
 /**
@@ -105,12 +112,39 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         id,
         username: usernamesByUserId.get(id) ?? id,
       }));
+      const startsAt = getScheduledStartAt(tableId);
       for (const playerId of table.seatOrder) {
         const target = socketsByUserId.get(playerId);
         if (target && target.currentTableId === tableId) {
-          target.emit("table:state", { ...table.getPublicStateFor(playerId), seatUsernames });
+          target.emit("table:state", { ...table.getPublicStateFor(playerId), seatUsernames, startsAt });
         }
       }
+    }
+
+    /**
+     * Si hay jugadores suficientes para jugar y todavía no hay ninguna mano
+     * en marcha ni una cuenta atrás ya programada, programa el inicio (de la
+     * primera mano de la partida, o de la siguiente si la mesa acaba de
+     * "revivir" tras una recompra) pasados FIRST_HAND_COUNTDOWN_MS — sin que
+     * nadie tenga que pulsar ningún botón.
+     */
+    function maybeScheduleHandStart(tableId: string): void {
+      const table = getTable(tableId);
+      if (!table || table.currentHand || scheduledStarts.has(tableId) || !table.canStartHand()) return;
+      const startAt = Date.now() + FIRST_HAND_COUNTDOWN_MS;
+      const timer = setTimeout(() => {
+        scheduledStarts.delete(tableId);
+        const t = getTable(tableId);
+        if (!t || t.currentHand || !t.canStartHand()) return;
+        try {
+          t.startHand();
+        } catch {
+          // no pasa nada: se quedará esperando a que haya jugadores suficientes
+        }
+        broadcastTableState(tableId);
+      }, FIRST_HAND_COUNTDOWN_MS);
+      scheduledStarts.set(tableId, { timer, startAt });
+      broadcastTableState(tableId); // para que se vea la cuenta atrás desde ya
     }
 
     /**
@@ -135,9 +169,10 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       broadcastTableState(tableId);
 
       if (hand?.result) {
-        clearNextHandTimer(tableId);
+        clearScheduledStart(tableId);
+        const startAt = Date.now() + HAND_END_PAUSE_MS;
         const timer = setTimeout(async () => {
-          nextHandTimers.delete(tableId);
+          scheduledStarts.delete(tableId);
           const t = getTable(tableId);
           if (!t || t.currentHand !== hand) return; // algo raro cambió mientras tanto: no tocar nada
           t.finishHandCleanup();
@@ -157,16 +192,19 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
                 console.error(`No se pudo abonar el fin de partida a ${entry.userId} en ${tableId}:`, err);
               }
             }
+            broadcastTableState(tableId);
           } else if (!t.isGameOver() && t.canStartHand()) {
             try {
               t.startHand();
             } catch {
-              // no pasa nada: se quedará esperando a que alguien pulse "Empezar mano"
+              // no pasa nada: se quedará esperando a que haya jugadores suficientes
             }
+            broadcastTableState(tableId);
+          } else {
+            broadcastTableState(tableId);
           }
-          broadcastTableState(tableId);
         }, HAND_END_PAUSE_MS);
-        nextHandTimers.set(tableId, timer);
+        scheduledStarts.set(tableId, { timer, startAt });
       }
     }
 
@@ -207,6 +245,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         socket.join(table.id);
         socket.currentTableId = table.id;
         broadcastTableState(table.id);
+        maybeScheduleHandStart(table.id);
       } catch (err) {
         emitError(err, "No se pudo unir a la mesa");
       }
@@ -240,6 +279,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         socket.join(table.id);
         socket.currentTableId = table.id;
         broadcastTableState(table.id);
+        maybeScheduleHandStart(table.id);
       } catch (err) {
         emitError(err, "No se pudo crear la sala privada");
       }
@@ -268,6 +308,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         socket.join(table.id);
         socket.currentTableId = table.id;
         broadcastTableState(table.id);
+        maybeScheduleHandStart(table.id);
       } catch (err) {
         emitError(err, "No se pudo unir a la sala privada");
       }
@@ -302,6 +343,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
         }
         table.rebuy(socket.userId);
         broadcastTableState(tableId);
+        maybeScheduleHandStart(tableId);
       } catch (err) {
         emitError(err, "No se pudo completar la recompra de fichas");
       }
@@ -369,7 +411,7 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
       const table = getTable(tableId);
       if (table) {
         table.removePlayer(socket.userId);
-        if (table.seatOrder.length < 2) clearNextHandTimer(tableId);
+        if (table.seatOrder.length < 2) clearScheduledStart(tableId);
       }
       socket.leave(tableId);
       socket.currentTableId = null;

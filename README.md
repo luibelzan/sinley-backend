@@ -170,6 +170,13 @@ npm test
   siguiente mano sola — nadie tiene que pulsar ningún botón entre manos,
   salvo la primera de la sesión. Esto se repite automáticamente mientras
   sigan quedando al menos 2 jugadores con fichas.
+- **Cuenta atrás para la primera mano**: en cuanto haya 2 jugadores con
+  fichas sentados (o vuelva a haberlos tras una recompra) y no haya ninguna
+  mano en curso, se programa el inicio pasados `FIRST_HAND_COUNTDOWN_MS` (5
+  segundos) — el botón manual de "Empezar mano" ya no hace falta. El
+  servidor manda el instante exacto (`startsAt`, epoch ms) en el estado de
+  la mesa; el frontend calcula los segundos restantes localmente con su
+  propio reloj, sin depender de que lleguen más mensajes.
 - **Fin de partida**: en cuanto, entre manos, deja de haber más de un
   jugador con fichas (y ya se había jugado alguna mano), `Table.isGameOver()`
   se activa y el estado incluye `standings`: la clasificación final
