@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GameRuleError, GileHand } from "./matchEngine";
+import { GameRuleError, GileHand, resolveManoTieBreak } from "./matchEngine";
 import { GamePhase } from "./types";
 
 const BIG_STACK = 100_000; // stack "ilimitado" para tests que no quieren tocar el límite de all-in
@@ -388,4 +388,88 @@ test("descarte con 4 jugadores descartando el máximo: se rebarajan los descarte
     const p = hand.getPublicState(id).players.find((pl) => pl.id === id)!;
     assert.equal(p.cardCount, 4, `${id} debería seguir teniendo 4 cartas tras el descarte`);
   }
+});
+
+test("desempate: gana el mano (siguiente al repartidor), no el repartidor", () => {
+  const seating = ["ana", "beto", "carla", "dario"]; // orden de turno antihorario
+  const dealerIndex = 0; // ana reparte
+
+  // El mano es "beto" (siguiente a ana). Si beto está empatado, gana él,
+  // aunque el repartidor (ana) también estuviera entre los empatados.
+  const winner1 = resolveManoTieBreak(seating, dealerIndex, ["ana", "beto"]);
+  assert.equal(winner1, "beto");
+
+  // Si el mano (beto) no está entre los empatados, se sigue el orden de
+  // turno a partir de él: el siguiente empatado es "carla".
+  const winner2 = resolveManoTieBreak(seating, dealerIndex, ["ana", "carla"]);
+  assert.equal(winner2, "carla");
+
+  // Si ni siquiera el repartidor está empatado, se recorre toda la mesa en
+  // orden de turno desde el mano hasta encontrar a alguien empatado.
+  const winner3 = resolveManoTieBreak(seating, dealerIndex, ["dario"]);
+  assert.equal(winner3, "dario");
+});
+
+test("desempate: el repartidor NO tiene prioridad especial si está empatado pero no es el mano", () => {
+  const seating = ["ana", "beto", "carla"];
+  const dealerIndex = 1; // beto reparte, así que el mano es "carla"
+
+  // Empatan el repartidor (beto) y otro jugador que no es el mano: gana el
+  // que esté más cerca del mano seguido en orden de turno, nunca el
+  // repartidor por el mero hecho de serlo.
+  const winner = resolveManoTieBreak(seating, dealerIndex, ["beto", "ana"]);
+  // Orden de turno desde el mano (carla): carla, ana, beto.
+  // "carla" no está empatada, así que gana "ana" antes que "beto".
+  assert.equal(winner, "ana");
+});
+
+test("regresión: empate real con mesa de 10€ — el mano se lleva el bote completo, nada se pierde", () => {
+  const hand = new GileHand({
+    playerIds: ["ana", "beto"],
+    dealerId: "ana", // el mano es "beto"
+    tieBreakVariant: "dealer_privilege",
+    stacks: { ana: 1000, beto: 1000 }, // 10€ cada uno
+  });
+  hand.start();
+  assert.equal(hand.actingPlayerId, "beto");
+
+  // Fijamos las 2 cartas iniciales de cada uno a palos distintos entre sí:
+  // así es matemáticamente imposible que el reparto adicional (2 cartas más,
+  // aleatorias) complete un póker de palo por azar, y el test es 100%
+  // determinista en vez de depender de la suerte del reparto.
+  hand.__debugSetHand("ana", [
+    { suit: "oros", rank: 1 },
+    { suit: "copas", rank: 3 },
+  ]);
+  hand.__debugSetHand("beto", [
+    { suit: "espadas", rank: 7 },
+    { suit: "bastos", rank: 3 },
+  ]);
+
+  hand.applyAction("beto", { type: "bet", amount: 999_999_999 }); // all-in
+  hand.applyAction("ana", { type: "raise", amount: 999_999_999 }); // all-in también
+
+  // Forzamos un empate real (mismas 4 cartas, misma puntuación) para los dos.
+  const tiedHand = [
+    { suit: "oros" as const, rank: 1 as const },
+    { suit: "oros" as const, rank: 11 as const },
+    { suit: "oros" as const, rank: 12 as const },
+    { suit: "copas" as const, rank: 3 as const },
+  ];
+  assert.equal(hand.phase, GamePhase.DISCARD); // nunca instant_flush, gracias a las cartas fijadas arriba
+  hand.__debugSetHand("ana", [...tiedHand]);
+  hand.__debugSetHand("beto", [...tiedHand]);
+  hand.applyDiscard("beto", { cardIndexes: [] });
+  hand.applyDiscard("ana", { cardIndexes: [] });
+
+  assert.equal(hand.phase, GamePhase.FINISHED);
+  assert.equal(hand.result!.reason, "showdown");
+  // Gana "beto" (el mano), no "ana" (la repartidora).
+  assert.equal(hand.result!.payouts.length, 1);
+  assert.equal(hand.result!.payouts[0]!.playerId, "beto");
+  assert.equal(hand.result!.payouts[0]!.amount, 2000);
+
+  const finalStacks = hand.getFinalStacks();
+  assert.deepEqual(finalStacks, { ana: 0, beto: 2000 });
+  assert.equal(finalStacks["ana"]! + finalStacks["beto"]!, 2000); // nada se pierde ni se inventa
 });

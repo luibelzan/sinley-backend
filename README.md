@@ -76,8 +76,7 @@ alguien tiene delante en una mesa física. A partir de ahí:
 
 - Ninguna apuesta puede superar el stack de quien la hace: si pide más de lo
   que le queda, se le aporta automáticamente todo lo que tiene (all-in) en vez
-  de rechazar la acción.
-- En cuanto a un jugador ya no le queda nada que aportar, dos cosas cambian:
+  de rechazar la acción.- En cuanto a un jugador ya no le queda nada que aportar, dos cosas cambian:
   deja de tener turno (nunca se le vuelve a pedir que actúe, pero sigue en la
   mano), y en cuanto ya no queda más de un jugador con capacidad de seguir
   apostando, **todas las rondas de apuestas restantes se saltan automáticamente**
@@ -92,6 +91,20 @@ alguien tiene delante en una mesa física. A partir de ahí:
 - `applyAction` devuelve cuánto se aportó **de verdad** al bote (ya limitado
   al stack), y es exactamente esa cantidad la que la capa de sockets debita
   del wallet — nunca la cantidad nominal que el jugador pidió.
+- La victoria automática por póker de palo (`instant_flush`) respeta estas
+  mismas capas: quien tiene el póker de palo gana cada capa a la que llegó a
+  aportar, pero nunca más de eso — si se quedó corto de fichas, las capas
+  superiores se deciden entre quienes sí llegaron a aportar tanto,
+  comparando sus manos con normalidad.
+
+### Desempate: gana el mano, no el repartidor
+
+Cuando dos o más jugadores empatan a puntos en el showdown (variante
+`dealer_privilege`, la oficial), gana el **mano** — el jugador que juega
+primero tras el repartidor, no el repartidor en sí. Si el mano no está entre
+los empatados, se sigue comprobando en orden de turno a partir de él. La
+función pura `resolveManoTieBreak(seating, dealerIndex, tiedIds)` en
+`matchEngine.ts` implementa esta regla de forma aislada y testeable.
 
 **Nota sobre el descarte**: con la baraja de 28 cartas, el peor caso posible
 (4 jugadores descartando las 4 cartas cada uno = 16 cartas) no cabe con lo
@@ -122,7 +135,7 @@ npm test
   mover esto a Redis, pero la lógica no cambiaría).
 - **`tableManager.ts`** — `findOrCreateRoom(capacity, buyInCents)`: busca una
   mesa **pública** abierta con esa configuración exacta (hueco libre, sin
-  mano en curso) o crea una nueva. Las salas disponibles son fijas:
+  mano en curso, **y cuya partida no haya terminado ya**) o crea una nueva. Las salas disponibles son fijas:
   `ROOM_CAPACITIES = [2, 3, 4]` y `BUY_IN_TIERS_EUROS = [1, 2, 4, 5, 8, 10, 20, 25, 50, 100, 250]`.
   Para jugar con amigos, `createPrivateRoom(capacity, buyInCents)` crea una
   mesa marcada como privada con un código de invitación único de 6
@@ -163,6 +176,29 @@ npm test
   (posición y ganancia/pérdida neta de cada jugador, sumando todas sus
   compras de fichas incluidas las recompras). El frontend muestra entonces
   una pantalla de resultados en vez de la mesa.
+- **Importante**: `findOrCreateRoom` nunca reutiliza una mesa cuya partida ya
+  terminó (`isGameOver()`), aunque tenga hueco libre. Si no fuera así, un
+  jugador que se queda sentado sin salir tras perder (p. ej. cierra la
+  pestaña sin pulsar "Salir") dejaría esa mesa con un hueco libre pero ya
+  "terminada"; el siguiente que buscara mesa con la misma configuración
+  caería ahí y vería el resultado de la partida ajena antes incluso de que
+  se sentara nadie más. Las mesas privadas sí pueden reutilizarse con su
+  código a propósito (para eso sirve el código: volver a la misma mesa).
+- **El abono final SÍ vuelve al wallet**: en cuanto la partida se da por
+  terminada, `Table.settleGameOverPayouts()` congela la clasificación y pone
+  a 0 los stacks de la mesa (ya "cobrados"), y la capa de sockets abona a
+  cada jugador su stack final real al wallet (un solo `bet_credit` por
+  persona, justo una vez). Antes de este punto, el dinero de un jugador que
+  ganaba una mesa se quedaba flotando en el stack de la mesa para siempre y
+  nunca volvía a su saldo real — el buy-in se debitaba pero jamás se
+  acreditaba nada de vuelta.
+- **Importante**: al salir de la mesa (`removePlayer`), se olvida también su
+  historial de compras (`totalBuyIns`) en esa mesa concreta — las mesas
+  públicas nunca se destruyen, solo se vacían, así que si la misma mesa se
+  recicla para una partida nueva y alguien vuelve a sentarse en ella, su
+  compra de la sesión anterior no debe sumarse a la nueva (si no, el neto
+  final saldría mal: el ganador parecería ganar de menos, el perdedor
+  perder de más, exactamente el doble de la ficha de la mesa).
 
 ### Probarlo con los scripts de demo
 Como probar WebSockets a mano con curl no es práctico, hay dos scripts:

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createPrivateRoom, findOrCreateRoom, findPrivateRoomByCode } from "./tableManager";
+import { GamePhase } from "../game/types";
 
 test("findOrCreateRoom nunca devuelve una mesa privada, aunque coincida capacidad e importe", () => {
   const priv = createPrivateRoom(2, 1000);
@@ -8,6 +9,36 @@ test("findOrCreateRoom nunca devuelve una mesa privada, aunque coincida capacida
   const pub = findOrCreateRoom(2, 1000);
   assert.notEqual(pub.id, priv.id);
   assert.equal(pub.isPrivate, false);
+});
+
+test("findOrCreateRoom nunca reutiliza una mesa cuya partida ya terminó, aunque tenga hueco libre", () => {
+  const table = findOrCreateRoom(2, 1500);
+  table.seatPlayerWithStack("ana", 1500);
+  table.seatPlayerWithStack("beto", 1500);
+
+  const hand = table.startHand();
+  hand.applyAction("beto", { type: "bet", amount: 999_999 }); // all-in
+  hand.applyAction("ana", { type: "raise", amount: 999_999 }); // all-in también
+  if (hand.phase === GamePhase.DISCARD) {
+    hand.applyDiscard("beto", { cardIndexes: [] });
+    hand.applyDiscard("ana", { cardIndexes: [] });
+  }
+  table.finishHandCleanup();
+  assert.equal(table.isGameOver(), true);
+
+  // El que ganó pulsa "salir" (vuelve al panel con normalidad)...
+  const winnerId = table.stacks.get("ana") === 0 ? "beto" : "ana";
+  const loserId = winnerId === "ana" ? "beto" : "ana";
+  table.removePlayer(winnerId);
+  // ...pero el que perdió nunca pulsa nada (cierra la pestaña sin más):
+  // se queda sentado como jugador "fantasma", con sus fichas a 0.
+  assert.equal(table.seatOrder.includes(loserId), true);
+  assert.equal(table.seatOrder.length, 1);
+
+  // Alguien más busca mesa con la MISMA configuración: no debe reutilizar
+  // esta mesa "fantasma", aunque tenga hueco libre (1 < 2) y no haya mano en curso.
+  const newTable = findOrCreateRoom(2, 1500);
+  assert.notEqual(newTable.id, table.id);
 });
 
 test("createPrivateRoom genera un código único, sin caracteres ambiguos", () => {

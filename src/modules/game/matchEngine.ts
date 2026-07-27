@@ -80,6 +80,29 @@ function computePotLayers(contributions: Record<string, number>, activeIds: Set<
  * retirada de los demás). La rotación del repartidor entre manos y la gestión
  * de mesas/sockets viven en otra capa.
  */
+/**
+ * Gana el "mano" (el jugador que juega primero tras el repartidor, es decir,
+ * el siguiente en el reparto) si está entre los empatados; si no, se sigue
+ * comprobando en orden de turno a partir de él. El repartidor en sí NO tiene
+ * ninguna prioridad especial.
+ *
+ * `seating` es el orden de turno completo (antihorario) y `dealerIndex` su
+ * índice dentro de ese array.
+ */
+export function resolveManoTieBreak(seating: string[], dealerIndex: number, tiedIds: string[]): string {
+  const n = seating.length;
+  if (n === 0) {
+    throw new GameRuleError("No se puede resolver un empate sin jugadores");
+  }
+  const manoIndex = (dealerIndex + 1) % n;
+  for (let step = 0; step < n; step++) {
+    const idx = (manoIndex + step) % n;
+    const candidate = seating[idx]!;
+    if (tiedIds.includes(candidate)) return candidate;
+  }
+  throw new GameRuleError("No se pudo resolver el empate por privilegio del mano");
+}
+
 export class GileHand {
   readonly seating: string[];
   readonly dealerIndex: number;
@@ -187,6 +210,16 @@ export class GileHand {
     const player = this.players.get(playerId);
     if (!player) throw new GameRuleError(`Jugador desconocido: ${playerId}`);
     return player;
+  }
+
+  /**
+   * SOLO PARA TESTS: fuerza la mano de un jugador a unas cartas concretas,
+   * saltándose el reparto aleatorio. Así se pueden probar de forma
+   * determinista escenarios que dependen de cartas exactas (empates,
+   * combinaciones concretas), sin depender de que el azar los produzca.
+   */
+  __debugSetHand(playerId: string, cards: Card[]): void {
+    this.getPlayerOrThrow(playerId).hand = cards;
   }
 
   // ---------- reparto ----------
@@ -389,13 +422,11 @@ export class GileHand {
     }
 
     if (this.phase === GamePhase.BETTING_2) {
-      const instantWinner = this.checkInstantFlushWinner();
-      if (instantWinner) {
-        this.finishHand(
-          [{ playerId: instantWinner.winnerId, amount: this.pot }],
-          instantWinner.evaluations,
-          "instant_flush"
-        );
+      const flushHolderIds = this.activePlayers()
+        .filter((p) => fourOfSameSuit(p.hand) !== null)
+        .map((p) => p.id);
+      if (flushHolderIds.length > 0) {
+        this.resolveInstantFlushWin(flushHolderIds);
         return;
       }
       this.phase = GamePhase.DISCARD;
@@ -411,23 +442,41 @@ export class GileHand {
     }
   }
 
-  private checkInstantFlushWinner(): { winnerId: string; evaluations: Record<string, HandEvaluation> } | null {
-    const active = this.activePlayers();
-    const flushHolders = active.filter((p) => fourOfSameSuit(p.hand) !== null);
-    if (flushHolders.length === 0) return null;
+  /**
+   * Resuelve la victoria automática por póker de palo respetando los botes
+   * en capas: quien tiene el póker de palo gana cada capa a la que llegó a
+   * aportar, pero NUNCA más de eso — si se quedó corto de fichas frente a
+   * otro jugador, las capas por encima de su aportación se deciden entre
+   * quienes sí llegaron, comparando sus manos con normalidad. (Antes esto
+   * daba el bote entero al primer póker de palo, ignorando los botes
+   * divididos — un jugador corto de fichas podía llevarse dinero que no le
+   * correspondía.)
+   */
+  private resolveInstantFlushWin(flushHolderIds: string[]): void {
+    const { evaluations, layers } = this.evaluateActiveAndLayers();
 
-    const evaluations: Record<string, HandEvaluation> = {};
-    for (const p of flushHolders) evaluations[p.id] = evaluateHand(p.hand);
-
-    if (flushHolders.length === 1) {
-      return { winnerId: flushHolders[0]!.id, evaluations };
+    if (layers.length === 0) {
+      const winnerId =
+        flushHolderIds.length === 1 ? flushHolderIds[0]! : this.resolveTie(flushHolderIds, evaluations);
+      this.finishHand([{ playerId: winnerId, amount: 0 }], evaluations, "instant_flush");
+      return;
     }
 
-    const winnerId = this.resolveTie(
-      flushHolders.map((p) => p.id),
-      evaluations
-    );
-    return { winnerId, evaluations };
+    const payoutByPlayer = new Map<string, number>();
+    for (const layer of layers) {
+      if (layer.eligiblePlayerIds.length === 0) continue;
+      const flushInLayer = layer.eligiblePlayerIds.filter((id) => flushHolderIds.includes(id));
+      const winnerId =
+        flushInLayer.length > 0
+          ? flushInLayer.length === 1
+            ? flushInLayer[0]!
+            : this.resolveTie(flushInLayer, evaluations)
+          : this.pickWinnerAmong(layer.eligiblePlayerIds, evaluations);
+      payoutByPlayer.set(winnerId, (payoutByPlayer.get(winnerId) ?? 0) + layer.amount);
+    }
+
+    const payouts = Array.from(payoutByPlayer.entries()).map(([playerId, amount]) => ({ playerId, amount }));
+    this.finishHand(payouts, evaluations, "instant_flush");
   }
 
   /**
@@ -506,18 +555,27 @@ export class GileHand {
     return tied.length === 1 ? tied[0]! : this.resolveTie(tied, evaluations);
   }
 
-  private showdown(): void {
-    this.phase = GamePhase.SHOWDOWN;
+  /** Evalúa las manos de los jugadores activos y calcula las capas del bote según sus aportaciones. */
+  private evaluateActiveAndLayers(): {
+    active: PlayerState[];
+    evaluations: Record<string, HandEvaluation>;
+    layers: PotLayer[];
+  } {
     const active = this.activePlayers();
     const evaluations: Record<string, HandEvaluation> = {};
     for (const p of active) {
       evaluations[p.id] = evaluateHand(p.hand);
     }
-
     const contributions: Record<string, number> = {};
     for (const p of this.players.values()) contributions[p.id] = p.totalContributed;
     const activeIds = new Set(active.map((p) => p.id));
     const layers = computePotLayers(contributions, activeIds);
+    return { active, evaluations, layers };
+  }
+
+  private showdown(): void {
+    this.phase = GamePhase.SHOWDOWN;
+    const { active, evaluations, layers } = this.evaluateActiveAndLayers();
 
     if (layers.length === 0) {
       // Nadie llegó a apostar nada en toda la mano (todos pasaron siempre):
@@ -541,7 +599,7 @@ export class GileHand {
     this.finishHand(payouts, evaluations, "showdown");
   }
 
-  /** Aplica la regla de desempate configurada (privilegio del repartidor, u opcionalmente rango de palos). */
+  /** Aplica la regla de desempate configurada (privilegio del mano, u opcionalmente rango de palos). */
   private resolveTie(tiedIds: string[], evaluations: Record<string, HandEvaluation>): string {
     if (this.tieBreakVariant === "suit_rank") {
       const allHaveSuit = tiedIds.every((id) => evaluations[id]!.scoringSuit !== null);
@@ -549,20 +607,7 @@ export class GileHand {
         return this.resolveTieBySuitRank(tiedIds, evaluations);
       }
     }
-    return this.resolveTieByDealerPrivilege(tiedIds);
-  }
-
-  private resolveTieByDealerPrivilege(tiedIds: string[]): string {
-    const dealerId = this.seating[this.dealerIndex]!;
-    if (tiedIds.includes(dealerId)) return dealerId;
-
-    const n = this.seating.length;
-    for (let step = 1; step <= n; step++) {
-      const idx = (this.dealerIndex - step + n) % n;
-      const candidate = this.seating[idx]!;
-      if (tiedIds.includes(candidate)) return candidate;
-    }
-    throw new GameRuleError("No se pudo resolver el empate por privilegio del repartidor");
+    return resolveManoTieBreak(this.seating, this.dealerIndex, tiedIds);
   }
 
   private resolveTieBySuitRank(tiedIds: string[], evaluations: Record<string, HandEvaluation>): string {

@@ -121,9 +121,12 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
      * verlo. Solo al final de esa pausa se sincronizan las fichas, se limpia
      * la mano, y si siguen quedando al menos 2 jugadores con fichas se
      * arranca la siguiente sola, sin que nadie tenga que pulsar nada. El
-     * dinero de las apuestas nunca toca el wallet aquí — solo se mueve
-     * dentro del stack de fichas de la mesa (persistente entre manos); el
-     * wallet solo se toca al sentarse (buy-in) o al volver a comprar fichas.
+     * dinero de las apuestas nunca toca el wallet durante la mano — solo se
+     * mueve dentro del stack de fichas de la mesa; el wallet se toca al
+     * sentarse (buy-in), al volver a comprar fichas, y AQUÍ, en cuanto la
+     * partida se da por terminada: se abona a cada jugador el stack final
+     * que le quedara, una sola vez (si no, ese dinero se quedaría flotando
+     * en la mesa para siempre sin volver nunca a su saldo real).
      */
     function settleAndBroadcast(tableId: string): void {
       const table = getTable(tableId);
@@ -133,12 +136,28 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
 
       if (hand?.result) {
         clearNextHandTimer(tableId);
-        const timer = setTimeout(() => {
+        const timer = setTimeout(async () => {
           nextHandTimers.delete(tableId);
           const t = getTable(tableId);
           if (!t || t.currentHand !== hand) return; // algo raro cambió mientras tanto: no tocar nada
           t.finishHandCleanup();
-          if (!t.isGameOver() && t.canStartHand()) {
+
+          if (t.isGameOver() && !t.cachedStandings) {
+            const standings = t.settleGameOverPayouts();
+            for (const entry of standings) {
+              if (entry.finalStackCents <= 0) continue;
+              try {
+                await applyWalletTransaction({
+                  userId: entry.userId,
+                  amountCents: BigInt(entry.finalStackCents),
+                  type: "bet_credit",
+                  metadata: { reason: "game_over_cashout", tableId },
+                });
+              } catch (err) {
+                console.error(`No se pudo abonar el fin de partida a ${entry.userId} en ${tableId}:`, err);
+              }
+            }
+          } else if (!t.isGameOver() && t.canStartHand()) {
             try {
               t.startHand();
             } catch {

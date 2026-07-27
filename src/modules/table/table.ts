@@ -3,6 +3,14 @@ import { MAX_PLAYERS, MIN_PLAYERS, TieBreakVariant } from "../game/types";
 
 export class TableError extends Error {}
 
+export interface StandingEntry {
+  userId: string;
+  finalStackCents: number;
+  totalBuyInCents: number;
+  netCents: number;
+  position: number;
+}
+
 export interface TableOptions {
   capacity: number; // 2, 3 o 4
   buyInCents: number; // importe fijo de ficha con el que se sienta cualquiera en esta mesa
@@ -35,6 +43,8 @@ export class Table {
   readonly isPrivate: boolean;
   readonly code: string | null;
 
+  /** Se marca al terminar la partida, para no volver a cobrar el mismo stack dos veces. */
+  cachedStandings: StandingEntry[] | null = null;
   seatOrder: string[] = [];
   connectedUserIds: Set<string> = new Set();
   /** Fichas actuales de cada jugador sentado. Persiste entre manos. */
@@ -99,6 +109,10 @@ export class Table {
     }
     this.stacks.set(userId, this.buyInCents);
     this.totalBuyIns.set(userId, (this.totalBuyIns.get(userId) ?? 0) + this.buyInCents);
+    // Si la partida ya se había dado por terminada, una recompra la revive
+    // de verdad: se olvida la clasificación congelada para que, cuando
+    // vuelva a terminar, se calcule y se pague una nueva.
+    this.cachedStandings = null;
   }
 
   /** El jugador pierde la conexión, pero puede volver a entrar sin perder su asiento ni sus fichas. */
@@ -119,13 +133,18 @@ export class Table {
    * El jugador se va explícitamente de la mesa (no solo se desconecta).
    * Por ahora, las fichas que le quedaran en la mesa no se devuelven al
    * wallet (queda pendiente decidir qué hacer con el saldo de un jugador
-   * ausente) — simplemente se pierden al salir.
+   * ausente) — simplemente se pierden al salir. También se olvida su
+   * historial de compras en ESTA mesa: si la mesa se recicla más adelante
+   * (una mesa pública vacía puede reutilizarse para una partida nueva) y el
+   * mismo jugador vuelve a sentarse, su compra anterior no debe sumarse a la
+   * de la partida nueva.
    */
   removePlayer(userId: string): void {
     this.markDisconnected(userId);
     if (!this.currentHand) {
       this.seatOrder = this.seatOrder.filter((id) => id !== userId);
       this.stacks.delete(userId);
+      this.totalBuyIns.delete(userId);
     }
     // Si hay una mano en curso, se quita del seatOrder (y de stacks) al
     // terminar la mano, en finishHandCleanup — para no romper los índices
@@ -183,7 +202,7 @@ export class Table {
   }
 
   /** Clasificación final (estilo resultado de torneo): posición y ganancia/pérdida neta de cada jugador. */
-  getFinalStandings(): { userId: string; finalStackCents: number; totalBuyInCents: number; netCents: number; position: number }[] {
+  getFinalStandings(): StandingEntry[] {
     const entries = this.seatOrder.map((id) => ({
       userId: id,
       finalStackCents: this.stacks.get(id) ?? 0,
@@ -195,6 +214,24 @@ export class Table {
       netCents: entry.finalStackCents - entry.totalBuyInCents,
       position: index + 1,
     }));
+  }
+
+  /**
+   * Se llama UNA VEZ, justo cuando la partida se da por terminada: congela
+   * la clasificación final (para mostrarla siempre igual aunque se siga
+   * consultando el estado más tarde) y pone a 0 el stack de todos, porque su
+   * valor ya se ha "cobrado" — la capa de sockets es quien de verdad abona
+   * ese importe al wallet de cada jugador, usando lo que devuelve esta
+   * función. Si no se hiciera esto, el dinero del ganador se quedaría para
+   * siempre flotando en la mesa sin volver nunca a su saldo real.
+   */
+  settleGameOverPayouts(): StandingEntry[] {
+    const standings = this.getFinalStandings();
+    this.cachedStandings = standings;
+    for (const id of this.seatOrder) {
+      this.stacks.set(id, 0);
+    }
+    return standings;
   }
 
   /** Se llama tras liquidar (o no) el resultado de la mano: sincroniza fichas y prepara la siguiente. */
@@ -210,7 +247,10 @@ export class Table {
 
     const stillHere = this.seatOrder.filter((id) => this.connectedUserIds.has(id));
     for (const id of this.seatOrder) {
-      if (!stillHere.includes(id)) this.stacks.delete(id);
+      if (!stillHere.includes(id)) {
+        this.stacks.delete(id);
+        this.totalBuyIns.delete(id);
+      }
     }
     this.seatOrder = stillHere;
   }
@@ -229,7 +269,7 @@ export class Table {
       dealerId: this.seatOrder.length > 0 ? this.seatOrder[this.dealerIndex % this.seatOrder.length] : null,
       hand: this.currentHand ? this.currentHand.getPublicState(userId) : null,
       gameOver,
-      standings: gameOver ? this.getFinalStandings() : null,
+      standings: this.cachedStandings,
     };
   }
 }

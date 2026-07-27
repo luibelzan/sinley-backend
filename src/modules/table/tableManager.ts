@@ -46,6 +46,7 @@ export function findOrCreateRoom(capacity: number, buyInCents: number): Table {
       table.capacity === capacity &&
       table.buyInCents === buyInCents &&
       !table.currentHand &&
+      !table.isGameOver() &&
       table.seatOrder.length < table.capacity
     ) {
       return table;
